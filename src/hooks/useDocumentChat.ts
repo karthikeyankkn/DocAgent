@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { db, StoredFile, ChatMessage } from '@/db';
+import { db, StoredFile, ChatMessage, FileChunk } from '@/db';
 import { findRelevantChunks, formatContextForAI } from '@/lib/vectorSearch';
 import { supabase } from '@/integrations/supabase/client';
 
@@ -13,6 +13,8 @@ export function useDocumentChat(selectedFile: StoredFile | null) {
 
     setIsTyping(true);
 
+    let relevantChunks: FileChunk[] = [];
+
     try {
       // Add user message to DB
       await db.messages.add({
@@ -23,7 +25,7 @@ export function useDocumentChat(selectedFile: StoredFile | null) {
       });
 
       // Find relevant chunks
-      const relevantChunks = await findRelevantChunks(selectedFile.id, userMessage, 5);
+      relevantChunks = await findRelevantChunks(selectedFile.id, userMessage, 5);
       const context = formatContextForAI(relevantChunks);
 
       // Get recent messages for conversation context
@@ -31,7 +33,7 @@ export function useDocumentChat(selectedFile: StoredFile | null) {
         .where('fileId')
         .equals(selectedFile.id)
         .sortBy('timestamp');
-      
+
       const messagesToSend: Message[] = recentMessages
         .slice(-10) // Last 10 messages for context
         .map(m => ({ role: m.role, content: m.content }));
@@ -76,7 +78,7 @@ export function useDocumentChat(selectedFile: StoredFile | null) {
       });
 
       let buffer = '';
-      
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -137,7 +139,23 @@ export function useDocumentChat(selectedFile: StoredFile | null) {
 
     } catch (error) {
       console.error('Chat error:', error);
-      // Add error message
+
+      // Fallback: If AI fails but we found relevant chunks, show them
+      if (relevantChunks.length > 0) {
+        const fallbackContent = "I'm currently unable to connect to the AI service. However, I found these relevant sections in the document:\n\n" +
+          relevantChunks.map((c, i) => `**Section ${i + 1}**\n${c.chunkText}`).join('\n\n');
+
+        await db.messages.add({
+          fileId: selectedFile.id,
+          role: 'assistant',
+          content: fallbackContent,
+          timestamp: new Date(),
+          sources: relevantChunks.map(c => c.chunkText),
+        });
+        return;
+      }
+
+      // Add error message if no fallback available
       await db.messages.add({
         fileId: selectedFile.id,
         role: 'assistant',
